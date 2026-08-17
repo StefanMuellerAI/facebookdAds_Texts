@@ -4,7 +4,9 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import AdTabs from "@/components/AdTabs";
 import AssetUploader from "@/components/AssetUploader";
 import CopyButton from "@/components/CopyButton";
+import TextEditor from "@/components/TextEditor";
 import VariantPanel from "@/components/VariantPanel";
+import { countCharacters } from "@/lib/characters";
 import {
   DEFAULT_MEDIUM_PROMPT,
   DEFAULT_SHORT_PROMPT,
@@ -473,18 +475,19 @@ export default function Page() {
         <section className="panel">
           <div className="panel-head">
             <h2>Lang</h2>
-            <span className="count">{activeAd.longText.length} Zeichen</span>
+            <span className="count">
+              {countCharacters(activeAd.longText)} Zeichen
+            </span>
             <CopyButton text={activeAd.longText} />
           </div>
           <div className="panel-body">
-            <textarea
-              className="text-area text-area--long"
+            <TextEditor
               value={activeAd.longText}
-              onChange={(event) =>
-                patchAd(activeAd.id, { longText: event.target.value })
-              }
+              onChange={(value) => patchAd(activeAd.id, { longText: value })}
+              className="text-area--long"
               placeholder="Hier den langen Werbetext zum Asset schreiben …"
-              aria-label="Langer Werbetext"
+              ariaLabel="Langer Werbetext"
+              target="Lang"
             />
             <button
               type="button"

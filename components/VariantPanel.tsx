@@ -2,6 +2,8 @@
 
 import { useState } from "react";
 import CopyButton from "./CopyButton";
+import TextEditor from "./TextEditor";
+import { countCharacters } from "@/lib/characters";
 
 type Props = {
   title: string;
@@ -32,7 +34,7 @@ export default function VariantPanel({
     <section className="panel">
       <div className="panel-head">
         <h2>{title}</h2>
-        <span className="count">{text.length} Zeichen</span>
+        <span className="count">{countCharacters(text)} Zeichen</span>
         <CopyButton text={text} />
       </div>
 
@@ -85,12 +87,13 @@ export default function VariantPanel({
           ) : null}
         </div>
 
-        <textarea
-          className="text-area text-area--result"
+        <TextEditor
           value={text}
-          onChange={(event) => onTextChange(event.target.value)}
+          onChange={onTextChange}
+          className="text-area--result"
           placeholder={`${title}-Version erscheint hier – danach frei editierbar.`}
-          aria-label={`${title}-Version`}
+          ariaLabel={`${title}-Version`}
+          target={title}
         />
 
         <div className={`status ${error ? "is-error" : ""}`}>

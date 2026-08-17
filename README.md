@@ -21,6 +21,10 @@ Läuft auf Next.js (App Router) und der Claude API mit **Opus 5, Effort-Stufe `x
   den Standard. Sie gelten für die ganze Kampagne, damit alle Anzeigen nach denselben
   Regeln gekürzt werden.
 - **Notizfeld für das Ads-Team** – Laufzeit, Budget, Zielgruppe wandern mit in die Datei.
+- **Emoji- und Sonderzeichen-Picker** über jeder der drei Textspalten. Eingefügt wird an
+  der Cursorposition; eine markierte Stelle wird ersetzt. Der Picker bleibt offen, damit
+  mehrere Zeichen hintereinander gesetzt werden können, merkt sich die zuletzt genutzten
+  und lässt sich auf Deutsch durchsuchen („haken", „pfeil", „geld").
 - **Kopieren** aus jeder Box in die Zwischenablage.
 - **JSON-Export/-Import** inklusive base64-kodierter Assets. Alte Einzelanzeigen-Dateien
   (Schema v1) werden beim Laden automatisch in eine Kampagne überführt.
@@ -69,12 +73,22 @@ app/
 components/
   AdTabs.tsx             Tab-Leiste der Anzeigen inkl. Anlegen/Kopieren/Löschen
   AssetUploader.tsx      Upload, Drag & Drop, Vorschau, Größenlimit
+  TextEditor.tsx         Textfeld + Picker, fügt an der Cursorposition ein
+  CharacterPicker.tsx    Popover mit Suche, Kategorien und „zuletzt genutzt"
   VariantPanel.tsx       Mittel-/Kurz-Box mit aufklappbarem Prompt
   CopyButton.tsx         Zwischenablage inkl. Fallback für unsichere Origins
 lib/
   prompts.ts             System-Prompt, Standard-Prompts, MAX_ADS, JSON-Migration
+  characters.ts          Emoji-/Zeichensatz und Graphem-Zähler
   types.ts               Typen für Kampagne, Anzeige und API-Request
 ```
+
+### Zeichenzählung
+
+Die Zähler in den Spaltenköpfen zählen **sichtbare Zeichen** (Grapheme via
+`Intl.Segmenter`), nicht UTF-16-Einheiten. Ein 👍 zählt damit als 1 statt als 2 — sonst
+läge der Zähler bei Texten mit Emojis über der echten Länge, und genau daran hängen die
+Zeichenvorgaben in den Prompts (z. B. „maximal 150 Zeichen" für die Kurzversion).
 
 ## Format der JSON-Datei (Schema v2)
 
