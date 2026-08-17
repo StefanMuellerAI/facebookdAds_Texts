@@ -1,4 +1,7 @@
-import type { AdProject } from "./types";
+import type { Ad, Campaign } from "./types";
+
+/** Obergrenze an Anzeigen pro Kampagne. */
+export const MAX_ADS = 4;
 
 export const DEFAULT_MEDIUM_PROMPT = `Kürze den langen Werbetext zu einer Mittelversion für Facebook Ads.
 
@@ -32,11 +35,22 @@ Regeln:
 - Vermeide Formulierungen, die gegen Metas Werberichtlinien verstoßen (keine persönlichen Zuschreibungen wie "Bist du übergewichtig?", keine Heils- oder Einkommensversprechen).
 - Wenn ein Asset-Bild mitgeliefert wird, nutze es, damit Text und Bild zusammenpassen. Beschreibe das Bild aber nicht.`;
 
-export function createEmptyProject(): AdProject {
+/**
+ * IDs für neue Anzeigen. `crypto.randomUUID` läuft nur in Event-Handlern,
+ * also nach der Hydration – der Startzustand nutzt feste IDs, damit Server-
+ * und Client-Render identisch sind.
+ */
+export function createAdId(): string {
+  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
+    return crypto.randomUUID();
+  }
+  return `ad-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+export function createEmptyAd(name: string, id: string = createAdId()): Ad {
   return {
-    version: 1,
-    exportedAt: new Date().toISOString(),
-    projectName: "Neue Kampagne",
+    id,
+    name,
     asset: null,
     headlines: ["", "", ""],
     description: "",
@@ -44,56 +58,103 @@ export function createEmptyProject(): AdProject {
     longText: "",
     mediumText: "",
     shortText: "",
-    mediumPrompt: DEFAULT_MEDIUM_PROMPT,
-    shortPrompt: DEFAULT_SHORT_PROMPT,
   };
 }
 
-/**
- * Liest eine importierte JSON-Datei defensiv ein: fehlende oder falsch typisierte
- * Felder werden durch die Defaults eines leeren Projekts ersetzt, statt die App
- * mit einem Laufzeitfehler abstürzen zu lassen.
- */
-export function normalizeProject(input: unknown): AdProject {
-  const base = createEmptyProject();
-  if (typeof input !== "object" || input === null) return base;
-  const raw = input as Record<string, unknown>;
+export function createEmptyCampaign(): Campaign {
+  return {
+    version: 2,
+    exportedAt: new Date().toISOString(),
+    campaignName: "Neue Kampagne",
+    notes: "",
+    mediumPrompt: DEFAULT_MEDIUM_PROMPT,
+    shortPrompt: DEFAULT_SHORT_PROMPT,
+    // Feste ID: der Startzustand wird auch serverseitig gerendert.
+    ads: [createEmptyAd("Anzeige 1", "ad-1")],
+  };
+}
 
-  const str = (value: unknown, fallback: string) =>
-    typeof value === "string" ? value : fallback;
+function str(value: unknown, fallback: string): string {
+  return typeof value === "string" ? value : fallback;
+}
+
+function normalizeAsset(value: unknown): Ad["asset"] {
+  if (typeof value !== "object" || value === null) return null;
+  const raw = value as Record<string, unknown>;
+  const dataUrl = str(raw.dataUrl, "");
+  if (!dataUrl.startsWith("data:")) return null;
+  return {
+    name: str(raw.name, "asset"),
+    mimeType: str(raw.mimeType, "application/octet-stream"),
+    dataUrl,
+  };
+}
+
+function normalizeAd(value: unknown, index: number, usedIds: Set<string>): Ad {
+  const raw =
+    typeof value === "object" && value !== null
+      ? (value as Record<string, unknown>)
+      : {};
 
   const rawHeadlines = Array.isArray(raw.headlines) ? raw.headlines : [];
-  const headlines: [string, string, string] = [
+  const headlines: Ad["headlines"] = [
     str(rawHeadlines[0], ""),
     str(rawHeadlines[1], ""),
     str(rawHeadlines[2], ""),
   ];
 
-  let asset: AdProject["asset"] = null;
-  if (typeof raw.asset === "object" && raw.asset !== null) {
-    const rawAsset = raw.asset as Record<string, unknown>;
-    const dataUrl = str(rawAsset.dataUrl, "");
-    if (dataUrl.startsWith("data:")) {
-      asset = {
-        name: str(rawAsset.name, "asset"),
-        mimeType: str(rawAsset.mimeType, "application/octet-stream"),
-        dataUrl,
-      };
-    }
-  }
+  // Doppelte oder fehlende IDs würden React-Keys und laufende Streams
+  // durcheinanderbringen – deshalb hier hart eindeutig machen.
+  let id = str(raw.id, "");
+  if (!id || usedIds.has(id)) id = `ad-${index + 1}-${createAdId()}`;
+  usedIds.add(id);
 
   return {
-    version: 1,
-    exportedAt: str(raw.exportedAt, base.exportedAt),
-    projectName: str(raw.projectName, base.projectName),
-    asset,
+    id,
+    name: str(raw.name, `Anzeige ${index + 1}`),
+    asset: normalizeAsset(raw.asset),
     headlines,
     description: str(raw.description, ""),
     cta: str(raw.cta, ""),
     longText: str(raw.longText, ""),
     mediumText: str(raw.mediumText, ""),
     shortText: str(raw.shortText, ""),
+  };
+}
+
+/**
+ * Liest eine importierte JSON-Datei defensiv ein und migriert dabei das
+ * v1-Format (eine Anzeige pro Datei) auf das aktuelle Kampagnen-Format.
+ * Fehlende oder falsch typisierte Felder fallen auf Defaults zurück, statt
+ * die App mit einem Laufzeitfehler abstürzen zu lassen.
+ */
+export function normalizeCampaign(input: unknown): Campaign {
+  const base = createEmptyCampaign();
+  if (typeof input !== "object" || input === null) return base;
+  const raw = input as Record<string, unknown>;
+
+  const usedIds = new Set<string>();
+
+  // v1 erkennt man am fehlenden ads-Array: die Anzeige liegt flach in der Datei.
+  const isLegacy = !Array.isArray(raw.ads);
+  const rawAds = isLegacy ? [raw] : (raw.ads as unknown[]);
+
+  const ads = rawAds
+    .slice(0, MAX_ADS)
+    .map((ad, index) => normalizeAd(ad, index, usedIds));
+  if (ads.length === 0) ads.push(createEmptyAd("Anzeige 1"));
+
+  // v1 kennt keinen Anzeigennamen – dort trägt der Projektname beides.
+  const legacyName = str(raw.projectName, base.campaignName);
+  if (isLegacy) ads[0].name = legacyName;
+
+  return {
+    version: 2,
+    exportedAt: str(raw.exportedAt, base.exportedAt),
+    campaignName: str(raw.campaignName, legacyName),
+    notes: str(raw.notes, ""),
     mediumPrompt: str(raw.mediumPrompt, base.mediumPrompt),
     shortPrompt: str(raw.shortPrompt, base.shortPrompt),
+    ads,
   };
 }

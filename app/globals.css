@@ -101,6 +101,97 @@ textarea {
   border-color: var(--accent);
 }
 
+/* ---------- Anzeigen-Tabs ---------- */
+
+.adtabs {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  padding: 10px 20px;
+  border-bottom: 1px solid var(--border);
+  background: #13161c;
+  position: sticky;
+  top: 57px;
+  z-index: 15;
+}
+
+.adtab {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+  cursor: pointer;
+  max-width: 330px;
+  transition:
+    border-color 0.12s ease,
+    background 0.12s ease;
+}
+
+.adtab:hover {
+  border-color: var(--border-strong);
+}
+
+.adtab.is-active {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.adtab-index {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--text-dim);
+  background: var(--panel-raised);
+  border-radius: 4px;
+  padding: 1px 5px;
+  flex-shrink: 0;
+}
+
+.adtab.is-active .adtab-index {
+  color: var(--text);
+}
+
+.adtab-name {
+  font-weight: 550;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.adtab-progress {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--text-dim);
+  flex-shrink: 0;
+}
+
+.adtab-progress.is-complete {
+  color: var(--success);
+}
+
+.adtab-actions {
+  display: flex;
+  gap: 2px;
+  margin-left: 4px;
+  padding-left: 6px;
+  border-left: 1px solid var(--border-strong);
+  flex-shrink: 0;
+}
+
+.adtab-add {
+  border-style: dashed;
+}
+
+.adtabs-count {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-dim);
+  margin-left: auto;
+}
+
 .workspace {
   flex: 1;
   display: grid;

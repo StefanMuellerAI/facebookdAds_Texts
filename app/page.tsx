@@ -1,18 +1,22 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import AdTabs from "@/components/AdTabs";
 import AssetUploader from "@/components/AssetUploader";
 import CopyButton from "@/components/CopyButton";
 import VariantPanel from "@/components/VariantPanel";
 import {
   DEFAULT_MEDIUM_PROMPT,
   DEFAULT_SHORT_PROMPT,
-  createEmptyProject,
-  normalizeProject,
+  MAX_ADS,
+  createAdId,
+  createEmptyAd,
+  createEmptyCampaign,
+  normalizeCampaign,
 } from "@/lib/prompts";
-import type { AdProject, GenerateRequest } from "@/lib/types";
+import type { Ad, Campaign, GenerateRequest } from "@/lib/types";
 
-const STORAGE_KEY = "fb-ads-texts:project";
+const STORAGE_KEY = "fb-ads-texts:campaign";
 
 const HEADLINE_PLACEHOLDERS = [
   "z. B. Jetzt 30 % sparen",
@@ -21,6 +25,11 @@ const HEADLINE_PLACEHOLDERS = [
 ];
 
 type Variant = "medium" | "short";
+
+/** Schlüssel für Lade- und Fehlerzustand: eine Anzeige kann zwei Streams haben. */
+function jobKey(adId: string, variant: Variant): string {
+  return `${adId}:${variant}`;
+}
 
 function slugify(value: string): string {
   const slug = value
@@ -35,22 +44,17 @@ function slugify(value: string): string {
 }
 
 export default function Page() {
-  const [project, setProject] = useState<AdProject>(createEmptyProject);
+  const [campaign, setCampaign] = useState<Campaign>(createEmptyCampaign);
+  const [activeAdId, setActiveAdId] = useState<string>("ad-1");
   const [hydrated, setHydrated] = useState(false);
-  const [loading, setLoading] = useState<Record<Variant, boolean>>({
-    medium: false,
-    short: false,
-  });
-  const [errors, setErrors] = useState<Record<Variant, string | null>>({
-    medium: null,
-    short: null,
-  });
+  const [loading, setLoading] = useState<Record<string, boolean>>({});
+  const [errors, setErrors] = useState<Record<string, string | null>>({});
   const [toast, setToast] = useState<{ message: string; isError: boolean } | null>(
     null,
   );
 
   const importRef = useRef<HTMLInputElement>(null);
-  const abortRef = useRef<AbortController | null>(null);
+  const controllers = useRef(new Map<string, AbortController>());
   const toastTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const showToast = useCallback((message: string, isError = false) => {
@@ -59,73 +63,146 @@ export default function Page() {
     toastTimeout.current = setTimeout(() => setToast(null), 3200);
   }, []);
 
-  // Entwurf aus dem letzten Besuch wiederherstellen.
+  // Entwurf aus dem letzten Besuch wiederherstellen (migriert v1 automatisch).
   useEffect(() => {
     try {
       const stored = window.localStorage.getItem(STORAGE_KEY);
-      if (stored) setProject(normalizeProject(JSON.parse(stored)));
+      if (stored) {
+        const restored = normalizeCampaign(JSON.parse(stored));
+        setCampaign(restored);
+        setActiveAdId(restored.ads[0].id);
+      }
     } catch {
-      // Beschädigter oder zu großer Speicherstand: mit leerem Projekt weitermachen.
+      // Beschädigter Speicherstand: mit leerer Kampagne weitermachen.
     }
     setHydrated(true);
   }, []);
 
-  // Danach bei jeder Änderung sichern, damit ein Reload nichts kostet.
   useEffect(() => {
     if (!hydrated) return;
     try {
-      window.localStorage.setItem(STORAGE_KEY, JSON.stringify(project));
+      window.localStorage.setItem(STORAGE_KEY, JSON.stringify(campaign));
     } catch {
-      // Quota überschritten (meist ein großes Asset) – Autosave ist optional.
+      // Quota überschritten (meist große Assets) – Autosave ist optional.
     }
-  }, [project, hydrated]);
+  }, [campaign, hydrated]);
 
-  useEffect(
-    () => () => {
-      abortRef.current?.abort();
+  useEffect(() => {
+    const running = controllers.current;
+    return () => {
+      running.forEach((controller) => controller.abort());
       if (toastTimeout.current) clearTimeout(toastTimeout.current);
-    },
-    [],
+    };
+  }, []);
+
+  const activeAd = useMemo(
+    () => campaign.ads.find((ad) => ad.id === activeAdId) ?? campaign.ads[0],
+    [campaign.ads, activeAdId],
   );
 
-  function update<K extends keyof AdProject>(key: K, value: AdProject[K]) {
-    setProject((current) => ({ ...current, [key]: value }));
+  const busyAdIds = useMemo(
+    () =>
+      Array.from(
+        new Set(
+          Object.entries(loading)
+            .filter(([, isLoading]) => isLoading)
+            .map(([key]) => key.split(":")[0]),
+        ),
+      ),
+    [loading],
+  );
+
+  function updateCampaign<K extends keyof Campaign>(key: K, value: Campaign[K]) {
+    setCampaign((current) => ({ ...current, [key]: value }));
   }
 
+  /** Ändert genau eine Anzeige – immer über die ID, nie über den Index. */
+  const patchAd = useCallback((adId: string, patch: Partial<Ad>) => {
+    setCampaign((current) => ({
+      ...current,
+      ads: current.ads.map((ad) => (ad.id === adId ? { ...ad, ...patch } : ad)),
+    }));
+  }, []);
+
   function updateHeadline(index: number, value: string) {
-    setProject((current) => {
-      const headlines = [...current.headlines] as AdProject["headlines"];
-      headlines[index] = value;
-      return { ...current, headlines };
+    const headlines = [...activeAd.headlines] as Ad["headlines"];
+    headlines[index] = value;
+    patchAd(activeAd.id, { headlines });
+  }
+
+  function addAd() {
+    if (campaign.ads.length >= MAX_ADS) return;
+    const ad = createEmptyAd(`Anzeige ${campaign.ads.length + 1}`);
+    setCampaign((current) => ({ ...current, ads: [...current.ads, ad] }));
+    setActiveAdId(ad.id);
+  }
+
+  function duplicateAd(adId: string) {
+    if (campaign.ads.length >= MAX_ADS) return;
+    const source = campaign.ads.find((ad) => ad.id === adId);
+    if (!source) return;
+    const copy: Ad = { ...source, id: createAdId(), name: `${source.name} (Kopie)` };
+    setCampaign((current) => {
+      const index = current.ads.findIndex((ad) => ad.id === adId);
+      const ads = [...current.ads];
+      ads.splice(index + 1, 0, copy);
+      return { ...current, ads };
+    });
+    setActiveAdId(copy.id);
+  }
+
+  function deleteAd(adId: string) {
+    if (campaign.ads.length <= 1) return;
+    const ad = campaign.ads.find((item) => item.id === adId);
+    if (!window.confirm(`„${ad?.name ?? "Anzeige"}" wirklich löschen?`)) return;
+
+    // Laufende Streams dieser Anzeige beenden, sonst schreiben sie ins Leere.
+    (["medium", "short"] as Variant[]).forEach((variant) => {
+      controllers.current.get(jobKey(adId, variant))?.abort();
+      controllers.current.delete(jobKey(adId, variant));
+    });
+
+    setCampaign((current) => {
+      const ads = current.ads.filter((item) => item.id !== adId);
+      setActiveAdId((currentActive) =>
+        currentActive === adId ? ads[0].id : currentActive,
+      );
+      return { ...current, ads };
     });
   }
 
   async function streamVariant(
     variant: Variant,
-    snapshot: AdProject,
-    signal: AbortSignal,
+    ad: Ad,
+    prompts: Pick<Campaign, "mediumPrompt" | "shortPrompt">,
   ) {
+    const key = jobKey(ad.id, variant);
     const targetKey = variant === "medium" ? "mediumText" : "shortText";
+
+    controllers.current.get(key)?.abort();
+    const controller = new AbortController();
+    controllers.current.set(key, controller);
+
     const body: GenerateRequest = {
-      prompt: variant === "medium" ? snapshot.mediumPrompt : snapshot.shortPrompt,
-      longText: snapshot.longText,
-      headlines: snapshot.headlines,
-      description: snapshot.description,
-      cta: snapshot.cta,
-      assetDataUrl: snapshot.asset?.dataUrl ?? null,
+      prompt: variant === "medium" ? prompts.mediumPrompt : prompts.shortPrompt,
+      longText: ad.longText,
+      headlines: ad.headlines,
+      description: ad.description,
+      cta: ad.cta,
+      assetDataUrl: ad.asset?.dataUrl ?? null,
       variant: variant === "medium" ? "Mittel" : "Kurz",
     };
 
-    setLoading((current) => ({ ...current, [variant]: true }));
-    setErrors((current) => ({ ...current, [variant]: null }));
-    setProject((current) => ({ ...current, [targetKey]: "" }));
+    setLoading((current) => ({ ...current, [key]: true }));
+    setErrors((current) => ({ ...current, [key]: null }));
+    patchAd(ad.id, { [targetKey]: "" });
 
     try {
       const response = await fetch("/api/generate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
-        signal,
+        signal: controller.signal,
       });
 
       if (!response.ok) {
@@ -148,55 +225,66 @@ export default function Page() {
         const { done, value } = await reader.read();
         if (done) break;
         text += decoder.decode(value, { stream: true });
-        setProject((current) => ({ ...current, [targetKey]: text }));
+        patchAd(ad.id, { [targetKey]: text });
       }
       text += decoder.decode();
-      setProject((current) => ({ ...current, [targetKey]: text.trim() }));
+      patchAd(ad.id, { [targetKey]: text.trim() });
     } catch (error) {
       if (error instanceof DOMException && error.name === "AbortError") return;
       const message = error instanceof Error ? error.message : "Unbekannter Fehler";
-      setErrors((current) => ({ ...current, [variant]: message }));
+      setErrors((current) => ({ ...current, [key]: message }));
     } finally {
-      setLoading((current) => ({ ...current, [variant]: false }));
+      controllers.current.delete(key);
+      setLoading((current) => ({ ...current, [key]: false }));
     }
   }
 
   async function generateShorterVersions() {
-    if (!project.longText.trim()) {
+    if (!activeAd.longText.trim()) {
       showToast("Bitte zuerst einen langen Werbetext schreiben.", true);
       return;
     }
-    abortRef.current?.abort();
-    const controller = new AbortController();
-    abortRef.current = controller;
-    const snapshot = project;
+    const snapshot = activeAd;
+    const prompts = {
+      mediumPrompt: campaign.mediumPrompt,
+      shortPrompt: campaign.shortPrompt,
+    };
     await Promise.all([
-      streamVariant("medium", snapshot, controller.signal),
-      streamVariant("short", snapshot, controller.signal),
+      streamVariant("medium", snapshot, prompts),
+      streamVariant("short", snapshot, prompts),
     ]);
   }
 
   function cancelGeneration() {
-    abortRef.current?.abort();
-    abortRef.current = null;
-    setLoading({ medium: false, short: false });
+    (["medium", "short"] as Variant[]).forEach((variant) => {
+      const key = jobKey(activeAd.id, variant);
+      controllers.current.get(key)?.abort();
+      controllers.current.delete(key);
+      setLoading((current) => ({ ...current, [key]: false }));
+    });
   }
 
   function exportJson() {
-    const payload: AdProject = { ...project, exportedAt: new Date().toISOString() };
+    const payload: Campaign = {
+      ...campaign,
+      exportedAt: new Date().toISOString(),
+    };
     const blob = new Blob([JSON.stringify(payload, null, 2)], {
       type: "application/json",
     });
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
-    const date = payload.exportedAt.slice(0, 10);
     link.href = url;
-    link.download = `${slugify(project.projectName)}-${date}.json`;
+    link.download = `${slugify(campaign.campaignName)}-${payload.exportedAt.slice(0, 10)}.json`;
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
     URL.revokeObjectURL(url);
-    showToast("JSON exportiert.");
+    showToast(
+      `Kampagne mit ${campaign.ads.length} ${
+        campaign.ads.length === 1 ? "Anzeige" : "Anzeigen"
+      } exportiert.`,
+    );
   }
 
   function importJson(file: File) {
@@ -204,9 +292,24 @@ export default function Page() {
     reader.onload = () => {
       try {
         const parsed = JSON.parse(String(reader.result));
-        setProject(normalizeProject(parsed));
-        setErrors({ medium: null, short: null });
-        showToast("JSON geladen.");
+        const wasLegacy =
+          typeof parsed === "object" &&
+          parsed !== null &&
+          !Array.isArray((parsed as Record<string, unknown>).ads);
+        const next = normalizeCampaign(parsed);
+        controllers.current.forEach((controller) => controller.abort());
+        controllers.current.clear();
+        setCampaign(next);
+        setActiveAdId(next.ads[0].id);
+        setErrors({});
+        setLoading({});
+        showToast(
+          wasLegacy
+            ? "Alte Einzelanzeigen-Datei geladen und in eine Kampagne überführt."
+            : `Kampagne mit ${next.ads.length} ${
+                next.ads.length === 1 ? "Anzeige" : "Anzeigen"
+              } geladen.`,
+        );
       } catch {
         showToast("Die Datei ist kein gültiges JSON.", true);
       }
@@ -215,16 +318,21 @@ export default function Page() {
     reader.readAsText(file);
   }
 
-  function resetProject() {
-    if (!window.confirm("Alle Eingaben verwerfen und neu anfangen?")) return;
-    abortRef.current?.abort();
-    setProject(createEmptyProject());
-    setErrors({ medium: null, short: null });
-    setLoading({ medium: false, short: false });
-    showToast("Neues Projekt angelegt.");
+  function resetCampaign() {
+    if (!window.confirm("Alle Anzeigen verwerfen und neu anfangen?")) return;
+    controllers.current.forEach((controller) => controller.abort());
+    controllers.current.clear();
+    const next = createEmptyCampaign();
+    setCampaign(next);
+    setActiveAdId(next.ads[0].id);
+    setErrors({});
+    setLoading({});
+    showToast("Neue Kampagne angelegt.");
   }
 
-  const isGenerating = loading.medium || loading.short;
+  const mediumKey = jobKey(activeAd.id, "medium");
+  const shortKey = jobKey(activeAd.id, "short");
+  const isGenerating = Boolean(loading[mediumKey] || loading[shortKey]);
 
   return (
     <div className="app">
@@ -236,8 +344,8 @@ export default function Page() {
 
         <input
           className="project-name"
-          value={project.projectName}
-          onChange={(event) => update("projectName", event.target.value)}
+          value={campaign.campaignName}
+          onChange={(event) => updateCampaign("campaignName", event.target.value)}
           placeholder="Kampagnenname"
           aria-label="Kampagnenname"
         />
@@ -265,11 +373,21 @@ export default function Page() {
           <button type="button" className="btn" onClick={exportJson}>
             JSON exportieren
           </button>
-          <button type="button" className="btn btn--ghost" onClick={resetProject}>
+          <button type="button" className="btn btn--ghost" onClick={resetCampaign}>
             Neu
           </button>
         </div>
       </header>
+
+      <AdTabs
+        ads={campaign.ads}
+        activeId={activeAd.id}
+        busyIds={busyAdIds}
+        onSelect={setActiveAdId}
+        onAdd={addAd}
+        onDuplicate={duplicateAd}
+        onDelete={deleteAd}
+      />
 
       <main className="workspace">
         <section className="panel">
@@ -277,13 +395,25 @@ export default function Page() {
             <h2>Anzeige</h2>
           </div>
           <div className="panel-body">
+            <div className="field">
+              <label htmlFor="ad-name">Name der Anzeige</label>
+              <input
+                id="ad-name"
+                value={activeAd.name}
+                onChange={(event) =>
+                  patchAd(activeAd.id, { name: event.target.value })
+                }
+                placeholder="z. B. Retargeting Warenkorb"
+              />
+            </div>
+
             <AssetUploader
-              asset={project.asset}
-              onChange={(asset) => update("asset", asset)}
+              asset={activeAd.asset}
+              onChange={(asset) => patchAd(activeAd.id, { asset })}
               onError={(message) => showToast(message, true)}
             />
 
-            {project.headlines.map((headline, index) => (
+            {activeAd.headlines.map((headline, index) => (
               <div className="field" key={`headline-${index}`}>
                 <label htmlFor={`headline-${index}`}>Überschrift {index + 1}</label>
                 <input
@@ -300,8 +430,10 @@ export default function Page() {
               <textarea
                 id="description"
                 rows={3}
-                value={project.description}
-                onChange={(event) => update("description", event.target.value)}
+                value={activeAd.description}
+                onChange={(event) =>
+                  patchAd(activeAd.id, { description: event.target.value })
+                }
                 placeholder="Kurze Beschreibung unter der Überschrift"
               />
             </div>
@@ -310,16 +442,30 @@ export default function Page() {
               <label htmlFor="cta">Call to Action</label>
               <input
                 id="cta"
-                value={project.cta}
-                onChange={(event) => update("cta", event.target.value)}
+                value={activeAd.cta}
+                onChange={(event) =>
+                  patchAd(activeAd.id, { cta: event.target.value })
+                }
                 placeholder="z. B. Mehr dazu"
               />
             </div>
 
+            <div className="field">
+              <label htmlFor="notes">Notizen für das Ads-Team</label>
+              <textarea
+                id="notes"
+                rows={3}
+                value={campaign.notes}
+                onChange={(event) => updateCampaign("notes", event.target.value)}
+                placeholder="Laufzeit, Zielgruppe, Budget, Besonderheiten – gilt für die ganze Kampagne"
+              />
+            </div>
+
             <p className="hint">
-              Der Entwurf wird automatisch im Browser gespeichert. Für die Übergabe
-              oder ein Backup exportierst du ihn als JSON – das Asset liegt darin
-              base64-kodiert mit drin.
+              Die Notizen und die beiden Prompts gelten für die ganze Kampagne, alles
+              andere pro Anzeige. Der Entwurf wird automatisch im Browser gespeichert;
+              für die Übergabe exportierst du die Kampagne als JSON – die Assets liegen
+              darin base64-kodiert mit drin.
             </p>
           </div>
         </section>
@@ -327,14 +473,16 @@ export default function Page() {
         <section className="panel">
           <div className="panel-head">
             <h2>Lang</h2>
-            <span className="count">{project.longText.length} Zeichen</span>
-            <CopyButton text={project.longText} />
+            <span className="count">{activeAd.longText.length} Zeichen</span>
+            <CopyButton text={activeAd.longText} />
           </div>
           <div className="panel-body">
             <textarea
               className="text-area text-area--long"
-              value={project.longText}
-              onChange={(event) => update("longText", event.target.value)}
+              value={activeAd.longText}
+              onChange={(event) =>
+                patchAd(activeAd.id, { longText: event.target.value })
+              }
               placeholder="Hier den langen Werbetext zum Asset schreiben …"
               aria-label="Langer Werbetext"
             />
@@ -342,7 +490,7 @@ export default function Page() {
               type="button"
               className="btn btn--primary btn--wide"
               onClick={generateShorterVersions}
-              disabled={isGenerating || !project.longText.trim()}
+              disabled={isGenerating || !activeAd.longText.trim()}
             >
               {isGenerating ? "Generiere …" : "Kürzere Versionen generieren"}
             </button>
@@ -356,24 +504,24 @@ export default function Page() {
 
         <VariantPanel
           title="Mittel"
-          prompt={project.mediumPrompt}
+          prompt={campaign.mediumPrompt}
           defaultPrompt={DEFAULT_MEDIUM_PROMPT}
-          onPromptChange={(value) => update("mediumPrompt", value)}
-          text={project.mediumText}
-          onTextChange={(value) => update("mediumText", value)}
-          loading={loading.medium}
-          error={errors.medium}
+          onPromptChange={(value) => updateCampaign("mediumPrompt", value)}
+          text={activeAd.mediumText}
+          onTextChange={(value) => patchAd(activeAd.id, { mediumText: value })}
+          loading={Boolean(loading[mediumKey])}
+          error={errors[mediumKey] ?? null}
         />
 
         <VariantPanel
           title="Kurz"
-          prompt={project.shortPrompt}
+          prompt={campaign.shortPrompt}
           defaultPrompt={DEFAULT_SHORT_PROMPT}
-          onPromptChange={(value) => update("shortPrompt", value)}
-          text={project.shortText}
-          onTextChange={(value) => update("shortText", value)}
-          loading={loading.short}
-          error={errors.short}
+          onPromptChange={(value) => updateCampaign("shortPrompt", value)}
+          text={activeAd.shortText}
+          onTextChange={(value) => patchAd(activeAd.id, { shortText: value })}
+          loading={Boolean(loading[shortKey])}
+          error={errors[shortKey] ?? null}
         />
       </main>
 

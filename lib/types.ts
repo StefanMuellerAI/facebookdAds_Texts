@@ -7,12 +7,44 @@ export type AssetFile = {
   dataUrl: string;
 };
 
-export type AdProject = {
-  /** Schema-Version der JSON-Datei, damit spätere Formate migrierbar bleiben */
-  version: 1;
+/** Eine einzelne Anzeige innerhalb einer Kampagne. */
+export type Ad = {
+  /** Stabile ID – hält Streams und Tabs auseinander, auch wenn umsortiert wird */
+  id: string;
+  /** Sprechender Name, erscheint im Tab und dient dem Ads-Team zur Orientierung */
+  name: string;
+  asset: AssetFile | null;
+  headlines: [string, string, string];
+  description: string;
+  cta: string;
+  longText: string;
+  mediumText: string;
+  shortText: string;
+};
+
+/**
+ * Die exportierte JSON-Datei: eine Kampagne mit bis zu MAX_ADS Anzeigen.
+ * Die beiden Prompts liegen bewusst auf Kampagnen-Ebene – die Kürzungsregeln
+ * gelten für alle Anzeigen der Kampagne gleichermaßen.
+ */
+export type Campaign = {
+  /** Schema-Version der JSON-Datei, damit ältere Formate migrierbar bleiben */
+  version: 2;
   /** ISO-Zeitstempel des Exports */
   exportedAt: string;
-  /** Freier Projektname, erscheint im Dateinamen des Exports */
+  /** Name der Kampagne, erscheint im Dateinamen des Exports */
+  campaignName: string;
+  /** Freies Notizfeld für das Team, das die Anzeigen schaltet */
+  notes: string;
+  mediumPrompt: string;
+  shortPrompt: string;
+  ads: Ad[];
+};
+
+/** Version 1: eine einzelne Anzeige pro Datei. Wird beim Import migriert. */
+export type AdProjectV1 = {
+  version: 1;
+  exportedAt: string;
   projectName: string;
   asset: AssetFile | null;
   headlines: [string, string, string];
